@@ -1,0 +1,24 @@
+{
+  "name": "tiny-audit",
+  "version": "0.1.0",
+  "description": "Zero-dependency immutable audit log with HMAC-SHA256 signatures for Python",
+  "readme": "README.md",
+  "license": "MIT",
+  "keywords": ["audit", "logging", "compliance", "immutable", "hmac", "security"],
+  "authors": [{"name": "Hussain Alsaibai", "email": "hussain.alsaibai@gmail.com"}],
+  "repository": {"type": "git", "url": "https://github.com/hussain-alsaibai/tiny-audit"},
+  "classifiers": [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Logging",
+    "Topic :: Security"
+  ],
+  "requiresPython": ">=3.8"
+}
