@@ -123,7 +123,12 @@ Level.ADMIN   # 4  — admin action
 - `tiny_audit.py` — The library (~350 LOC)
 - `tests/test_tiny_audit.py` — Tests
 - `LICENSE` — MIT
-- `package.json` — Metadata
+- `pyproject.toml` — Packaging metadata
+
+> This is a Python library. It previously shipped a `package.json`, which is
+> an npm manifest: nothing read it, so it only served to declare the name
+> `tiny-audit` on a registry this project does not publish to. It has been
+> removed in favour of `pyproject.toml`.
 
 ## Ecosystem
 

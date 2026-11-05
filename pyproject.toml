@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tiny-audit"
+version = "0.1.0"
+description = "Zero-dependency immutable audit log with HMAC-SHA256 signatures for Python"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+authors = [{name = "Hussain Alsaibai", email = "hussain.alsaibai@gmail.com"}]
+keywords = ["audit", "logging", "compliance", "immutable", "hmac", "security"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Logging",
+    "Topic :: Security",
+]
+
+[project.urls]
+Homepage = "https://github.com/hussain-alsaibai/tiny-audit"
+Repository = "https://github.com/hussain-alsaibai/tiny-audit"
+Issues = "https://github.com/hussain-alsaibai/tiny-audit/issues"
+
+[tool.setuptools]
+# Without an explicit py-modules entry, a flat layout is ambiguous and
+# setuptools can produce an empty wheel. The library is one file.
+py-modules = ["tiny_audit"]

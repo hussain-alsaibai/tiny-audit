@@ -59,8 +59,12 @@ class AuditError(Exception):
     pass
 
 
-@dataclass(slots=True)
+@dataclass
 class AuditEntry:
+    # No `slots=True`: that keyword is Python 3.10+, and this package declares
+    # `Requires-Python: >=3.8`. It was the only 3.10+ construct in the file, so
+    # the module failed to import at all on 3.8 and 3.9 -- the declared floor
+    # was never exercised, because CI started at 3.10.
     """Immutable, signed audit log entry."""
     id: str           # UUID v4
     ts: str           # ISO-8601 UTC
