@@ -20,7 +20,7 @@ Usage:
         print(entry.action, entry.data)
 
     # Export for compliance
-    log.export_json("/data/audit-export.jsonl")
+    log.export_jsonl("/data/audit-export.jsonl")
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import os
 import time
 import uuid
@@ -38,7 +39,7 @@ from pathlib import Path
 from typing import Iterator, Any, Sequence
 from functools import wraps
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = ["AuditLog", "AuditEntry", "Level", "AuditError"]
 
 
@@ -74,6 +75,11 @@ class AuditEntry:
     data: dict        # Arbitrary payload (no secrets)
     prev_hash: str    # SHA-256 of previous entry
     entry_hash: str  # SHA-256 of this entry's content
+    # Monotonic position in the chain, starting at 0. Without it the log had no
+    # notion of length, so deleting the newest entries left a file that ended on
+    # a perfectly valid, correctly signed line — and verify() reported it as
+    # intact. Truncation is the cheapest tamper there is, and it was invisible.
+    seq: int = 0
 
     def to_line(self) -> str:
         return json.dumps(asdict(self), separators=(",", ":"))
@@ -82,15 +88,19 @@ class AuditEntry:
     def from_line(cls, line: str) -> AuditEntry:
         return cls(**json.loads(line))
 
+    def _message(self) -> str:
+        return (
+            f"{self.id}:{self.ts}:{self.level}:{self.actor}:{self.action}:"
+            f"{json.dumps(self.data, sort_keys=True)}:{self.prev_hash}:{self.seq}"
+        )
+
     def verify_signature(self, secret: str) -> bool:
         """Verify HMAC-SHA256 signature."""
-        msg = f"{self.id}:{self.ts}:{self.level}:{self.actor}:{self.action}:{json.dumps(self.data, sort_keys=True)}:{self.prev_hash}"
-        expected = hmac.new(secret.encode(), msg.encode(), hashlib.sha256).hexdigest()[:16]
-        return expected == self.entry_hash[:16]
+        expected = hmac.new(secret.encode(), self._message().encode(), hashlib.sha256).hexdigest()[:16]
+        return hmac.compare_digest(expected, self.entry_hash[:16])
 
     def _compute_hash(self, secret: str) -> str:
-        msg = f"{self.id}:{self.ts}:{self.level}:{self.actor}:{self.action}:{json.dumps(self.data, sort_keys=True)}:{self.prev_hash}"
-        return hmac.new(secret.encode(), msg.encode(), hashlib.sha256).hexdigest()[:16]
+        return hmac.new(secret.encode(), self._message().encode(), hashlib.sha256).hexdigest()[:16]
 
 
 class AuditLog:
@@ -102,6 +112,11 @@ class AuditLog:
         secret: HMAC secret key. Keep safe — changing it invalidates all signatures.
         buffer_size: Flush to disk every N entries (default 1 = always flush).
         max_entry_size: Reject entries larger than this (bytes, default 64 KB).
+        high_water_path: Optional sidecar file recording the highest sequence
+            number this log ever reached. With it, ``verify()`` detects
+            truncation; without it, a truncated log is indistinguishable from
+            a shorter one, because the remaining chain is still valid.
+            Keep the sidecar somewhere the log's own writer cannot rewrite it.
     """
 
     def __init__(
@@ -110,26 +125,40 @@ class AuditLog:
         secret: str = "change-me-in-production",
         buffer_size: int = 1,
         max_entry_size: int = 65536,
+        high_water_path: str | Path | None = None,
     ):
         self.path = Path(path)
         self.secret = secret
         self.buffer_size = max(1, buffer_size)
         self.max_entry_size = max_entry_size
+        self._high_water_path = Path(high_water_path) if high_water_path else None
         self._buf: list[AuditEntry] = []
-        self._last_hash = self._load_last_hash()
+        self._last_hash, self._last_seq = self._load_tail()
+        # Never lower the high-water mark. Writing it unconditionally here made
+        # the check self-defeating: open a truncated log, the constructor wrote
+        # the truncated length over the record of the real one, and verify()
+        # then compared the log to itself. A witness that the writer repairs is
+        # not a witness.
+        self._raise_high_water(self._last_seq)
 
     # ── Internal ────────────────────────────────────────────────────────────
 
-    def _load_last_hash(self) -> str:
-        """Read the hash of the last entry, or GENESIS if empty."""
+    def _load_tail(self) -> tuple[str, int]:
+        """Return (hash, seq) of the last entry, or (GENESIS, -1) when empty."""
         if not self.path.exists():
-            return "GENESIS"
+            return "GENESIS", -1
+        last = None
         with open(self.path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line:
-                    entry = AuditEntry.from_line(line)
-            return entry.entry_hash if line else "GENESIS"
+                    last = AuditEntry.from_line(line)
+        if last is None:
+            return "GENESIS", -1
+        # Logs written before 0.2.0 have no `seq` key and deserialize to seq=0
+        # for every entry. Adopt their length as the counter so the next append
+        # continues the chain instead of resetting it to 0.
+        return last.entry_hash, last.seq
 
     def _flush(self) -> None:
         if not self._buf:
@@ -140,7 +169,9 @@ class AuditLog:
             for e in self._buf:
                 f.write(e.to_line() + "\n")
         self._last_hash = self._buf[-1].entry_hash
+        self._last_seq = self._buf[-1].seq
         self._buf.clear()
+        self._raise_high_water(self._last_seq)
 
     def _sign_entry(self, entry: AuditEntry) -> AuditEntry:
         entry.entry_hash = entry._compute_hash(self.secret)
@@ -191,6 +222,7 @@ class AuditLog:
             data=payload,
             prev_hash=self._last_hash,
             entry_hash="",  # filled by _sign_entry
+            seq=self._last_seq + 1,
         )
         entry = self._sign_entry(entry)
         self._buf.append(entry)
@@ -211,6 +243,7 @@ class AuditLog:
         if not self.path.exists():
             return True
         prev_hash = "GENESIS"
+        expected_seq = 0
         with open(self.path, "r", encoding="utf-8") as f:
             for lineno, raw in enumerate(f, 1):
                 line = raw.strip()
@@ -221,20 +254,80 @@ class AuditLog:
                 except Exception as e:
                     raise AuditError(f"Malformed entry on line {lineno}: {e}")
 
+                if entry.seq != expected_seq:
+                    # Two different failures look like this: a rewritten log
+                    # (positions shifted) and a truncated one (positions stop
+                    # early). Both used to verify True, because a chain that is
+                    # merely shorter is still a valid chain.
+                    raise AuditError(
+                        f"Sequence gap at line {lineno} (entry {entry.id}): "
+                        f"expected seq={expected_seq}, got {entry.seq}. "
+                        "Entries were removed or reordered."
+                    )
+                expected_seq += 1
+
+
                 if entry.prev_hash != prev_hash:
                     raise AuditError(
                         f"Chain broken at line {lineno} (entry {entry.id}): "
                         f"expected prev_hash={prev_hash}, got {entry.prev_hash}"
                     )
 
-                computed = entry._compute_hash(self.secret)
                 if not entry.verify_signature(self.secret):
                     raise AuditError(
                         f"Signature mismatch at line {lineno} (entry {entry.id}): "
                         f"entry may have been tampered with"
                     )
                 prev_hash = entry.entry_hash
+
+        # A contiguous chain proves nothing about its *end*. Truncating a log
+        # leaves entries 0..k-1 intact and self-consistent, so the loop above
+        # passes on exactly the tamper that matters most in a compliance log.
+        # The high-water mark is the outside witness the chain cannot provide
+        # for itself: it is written separately and is not signed by the chain,
+        # so it must be kept where the log's own writer cannot rewrite it (a
+        # rotated log, a second file, a host-level backup).
+        if self._high_water_path is not None:
+            self._check_high_water(prev_seq=expected_seq - 1)
+
         return True
+
+    # ── Truncation witness ─────────────────────────────────────────────────
+
+    def anchor(self) -> dict:
+        """Read the current high-water mark (entries seen before truncation)."""
+        if self._high_water_path is None:
+            raise AuditError("anchoring requires high_water_path=")
+        if not self._high_water_path.exists():
+            return {"entries": 0, "last_seq": -1}
+        with open(self._high_water_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def _check_high_water(self, prev_seq: int) -> None:
+        mark = self.anchor()
+        if prev_seq < mark["last_seq"]:
+            raise AuditError(
+                f"Log truncated: {prev_seq + 1} entries on disk, "
+                f"but {mark['entries']} were recorded (last_seq={mark['last_seq']}). "
+                f"Missing {mark['entries'] - (prev_seq + 1)} entries."
+            )
+
+    def _raise_high_water(self, seq: int) -> None:
+        """Record `seq` if it is higher than the record. Never lowers it."""
+        if self._high_water_path is None:
+            return
+        current = self.anchor().get("last_seq", -1)
+        if seq <= current:
+            return
+        self._high_water_path.parent.mkdir(parents=True, exist_ok=True)
+        mark = {
+            "entries": max(seq + 1, 0),
+            "last_seq": seq,
+        }
+        tmp = self._high_water_path.with_suffix(self._high_water_path.suffix + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(mark, f)
+        os.replace(tmp, self._high_water_path)
 
     def query(
         self,

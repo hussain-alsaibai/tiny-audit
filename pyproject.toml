@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tiny-audit"
-version = "0.1.0"
+version = "0.2.0"
 description = "Zero-dependency immutable audit log with HMAC-SHA256 signatures for Python"
 readme = "README.md"
 license = {text = "MIT"}

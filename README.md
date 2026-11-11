@@ -7,7 +7,7 @@
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen.svg)](tiny_audit.py)
 
 Every entry is signed with HMAC-SHA256. Entries can never be deleted or
-modified — only appended. The chain is verifiable at any point. Great for
+modified without detection — only appended. The chain is verifiable at any point. Great for
 compliance, agentic workflows, financial systems, and anywhere you need
 **"this happened and nobody tampered with it"**.
 
@@ -64,24 +64,53 @@ async def create_order(user_id: int, items: list) -> dict:
 
 ## How Integrity Works
 
-Each entry stores a **chain hash** (`prev_hash`) — the hash of the previous
-entry. The first entry uses `"GENESIS"`. Every entry is also signed with
-HMAC-SHA256. When you call `verify()`, we walk the entire file and confirm:
+Each entry stores a **chain hash** (`prev_hash`) and a **sequence number**
+(`seq`). Both, plus a monotonic position, are inside the HMAC-SHA256 message.
+When you call `verify()`, we walk the whole file and confirm:
 
 1. `prev_hash` chains correctly
-2. HMAC signature is valid
-
-If any line is modified or deleted, `verify()` raises `AuditError`.
+2. `seq` runs `0, 1, 2, ...` with no gap and no reorder
+3. the HMAC signature on each entry is valid
+4. (with `high_water_path=`) the log is not shorter than it has ever been
 
 ```
-Entry 1: prev_hash=GENESIS, hash=a3f2...
-Entry 2: prev_hash=a3f2..., hash=b7c1...
-Entry 3: prev_hash=b7c1..., hash=d9e4...
+seq  prev_hash    hash
+0    GENESIS      a3f2...
+1    a3f2...      b7c1...
+2    b7c1...      d9e4...
 ```
+
+### The deletion case, honestly
+
+0.1.0 caught *edits* and missed *deletions of the tail*. A shorter chain is
+still a valid chain — every surviving line still chains and still verifies —
+so `truncate -s` or a half-finished log rotation left a log that reported
+itself intact. That is the cheapest tamper there is, and it is the one an
+audit log exists to catch.
+
+`seq` closes the middle-deletion and reorder cases on its own. The tail needs
+a witness *outside* the chain, because a log cannot prove its own length:
+
+```python
+log = AuditLog("/data/audit.log", secret=SECRET,
+               high_water_path="/var/lib/myapp/audit.highwater.json")
+
+log.log(Level.INFO, "user.login", {"user_id": 42})
+log.verify()          # True
+
+# The high-water mark is raised on every write and never lowered — including
+# by reopening the log. Keep it somewhere the log's own writer cannot rewrite.
+log.anchor()          # {"entries": N, "last_seq": N-1}
+```
+
+Delete the last two lines and `verify()` raises
+`AuditError: Log truncated: N-2 entries on disk, but N were recorded`.
+Without a `high_water_path`, truncation is still undetectable — that is a
+property of hash chains, not a bug, and it is pinned by a test.
 
 ## API Reference
 
-### `AuditLog(path, secret, buffer_size=1, max_entry_size=65536)`
+### `AuditLog(path, secret, buffer_size=1, max_entry_size=65536, high_water_path=None)`
 
 | Argument | Default | Description |
 |----------|---------|-------------|
@@ -89,6 +118,7 @@ Entry 3: prev_hash=b7c1..., hash=d9e4...
 | `secret` | `"change-me"` | HMAC secret key |
 | `buffer_size` | `1` | Flush to disk every N entries |
 | `max_entry_size` | `65536` | Max entry payload bytes |
+| `high_water_path` | `None` | Sidecar recording the highest `seq` ever written; enables truncation detection |
 
 ### Methods
 
@@ -96,7 +126,8 @@ Entry 3: prev_hash=b7c1..., hash=d9e4...
 |--------|---------|-------------|
 | `log(level, action, data, actor, idempotency_key)` | `AuditEntry` | Append signed entry |
 | `flush()` | — | Force flush buffer to disk |
-| `verify()` | `bool` | Verify chain + signatures (raises on tampered) |
+| `verify()` | `bool` | Verify chain, sequence and signatures (raises on tampered) |
+| `anchor()` | `dict` | Current high-water mark (`entries`, `last_seq`) |
 | `query(action, actor, level, since, until, limit)` | `Iterator[AuditEntry]` | Query entries |
 | `count()` | `int` | Total entry count |
 | `export_jsonl(path)` | `int` | Export to JSONL |
